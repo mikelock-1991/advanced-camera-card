@@ -1,3 +1,5 @@
+import { vi } from 'vitest';
+
 import type { ZoomSettingsObserved } from '../../src/components-lib/zoom/types';
 import type {
   AdvancedCameraCardSelect,
@@ -8,10 +10,12 @@ import type {
   RawAdvancedCameraCardConfig,
 } from '../../src/config/types';
 import type { Entity } from '../../src/ha/registry/entity/types';
+import type { FrontendLocaleData } from '../../src/ha/types';
 import type { MediaLoadedInfoEventDetail } from '../../src/types';
 import { createLogAction } from '../../src/utils/action';
 import { isRecord, isTruthy } from '../../src/utils/basic';
 import { fireAdvancedCameraCardEvent } from '../../src/utils/fire-advanced-camera-card-event';
+import { Timer } from '../../src/utils/timer';
 import { clickElement, deepQuery, deepQueryAll, holdElement } from './dom';
 import { FakeHASS, type FakeEntityOptions } from './fake-hass';
 import { createFixtureURL, SNAPSHOT_FIXTURE_FILENAME } from './fixtures';
@@ -67,6 +71,9 @@ export interface CameraHASSOptions {
 
   // The language Home Assistant is set to for translation tests.
   language?: string;
+
+  // The user's date and time settings, for tests that read a date or time.
+  locale?: FrontendLocaleData;
 }
 
 /**
@@ -86,6 +93,7 @@ export const createCameraHASS = (
       cameras.map((camera) => [camera.entityID, camera.registry]),
     ),
     ...(options?.language && { language: options.language }),
+    ...(options?.locale && { locale: options.locale }),
   });
 
 export interface GenericCameraHASSOptions extends CameraHASSOptions {
@@ -326,6 +334,33 @@ export const clickNextPreviousMedia = async (
   await clickElement(clickable);
 };
 
+// Enough wheel movement to drag the media viewer a whole media item along.
+const WHEEL_GESTURE_EVENTS = 10;
+const WHEEL_GESTURE_EVENT_DELTA = 100;
+
+/**
+ * Move the media viewer to the next or previous media with a mouse wheel
+ * gesture: a burst of wheel events over the carousel, which its wheel plugin
+ * turns into a drag of the slides.
+ */
+export const wheelNextPreviousMedia = (
+  root: ParentNode,
+  direction: 'next' | 'previous',
+): void => {
+  const carousel = deepQuery(root, 'advanced-camera-card-viewer-carousel');
+  const viewport = carousel ? deepQuery(carousel, '.embla__viewport') : null;
+  if (!viewport) {
+    throw new Error('The media viewer is showing no carousel');
+  }
+
+  const deltaY = (direction === 'next' ? 1 : -1) * WHEEL_GESTURE_EVENT_DELTA;
+  for (let i = 0; i < WHEEL_GESTURE_EVENTS; i++) {
+    viewport.dispatchEvent(
+      new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY }),
+    );
+  }
+};
+
 // Everything the status bar is displaying gets this class, whether it is a
 // string, an icon or an image.
 const STATUS_BAR_ITEM_SELECTOR = '.item';
@@ -350,3 +385,36 @@ export const getStatusBarStrings = (root: ParentNode): string[] =>
  */
 export const getStatusBarItem = (root: ParentNode, title: string): Element | null =>
   getStatusBarItems(root).find((item) => item.getAttribute('title') === title) ?? null;
+
+/**
+ * Wait until every pending promise callback has run: the browser runs a timer
+ * callback only once they all have.
+ *
+ * The `flushPromises` in `tests/test-utils.ts` waits on Node's
+ * `process.nextTick`, which the browser does not have.
+ */
+export const flushPromises = async (): Promise<void> => {
+  await new Promise<void>((resolve) => new Timer().start(0, resolve));
+};
+
+/**
+ * Record the configuration of every peer connection created from now on, until
+ * `vi.unstubAllGlobals()`.
+ *
+ * A peer connection with no reachable ICE server can fail, and be closed by its
+ * owner, as soon as it is created, so its configuration is captured on the way
+ * in rather than read back from the owner.
+ */
+export const captureRTCPeerConnectionConfigurations = (): RTCConfiguration[] => {
+  const configurations: RTCConfiguration[] = [];
+  vi.stubGlobal(
+    'RTCPeerConnection',
+    class extends RTCPeerConnection {
+      constructor(configuration?: RTCConfiguration) {
+        super(configuration);
+        configurations.push(configuration ?? {});
+      }
+    },
+  );
+  return configurations;
+};
